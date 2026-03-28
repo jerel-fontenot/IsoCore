@@ -1,118 +1,132 @@
 """
 IsoCore Inference Worker (src/isocore/processors/inference.py)
---------------------------------------------------------------
-The heavy-lifting process. Runs completely isolated from the async 
-event loop, consuming batches of data and simulating neural network math.
 """
+import os
+
+# CRITICAL FIX 1: Prevent PyTorch from spawning background threads that thrash the CPU
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 import multiprocessing
 import time
-import random
 import signal
 from typing import List
+import torch
+
+from transformers import pipeline
 
 from isocore.core.queue_manager import QueueManager
 from isocore.core.log_manager import LogManager
 from isocore.models.packet import DataPacket, ResultPacket
+from isocore.core.config import settings
+from isocore.core.database import DatabaseManager
 
 class InferenceWorker(multiprocessing.Process):
-    def __init__(self, queue_manager: QueueManager, log_queue: multiprocessing.Queue):
-        # Name the process so it looks clean in our rolling log file
-        super().__init__(name="Worker-GPU-0")
+    def __init__(self, queue_manager: QueueManager, log_queue: multiprocessing.Queue, worker_id: int = 0, shutdown_event=None):
+        super().__init__(name=f"Worker-CPU-{worker_id}")
         self.queue_manager = queue_manager
         self.log_queue = log_queue
+        self.worker_id = worker_id
+        self.shutdown_event = shutdown_event
         
-        # We declare these here, but we DO NOT initialize them yet.
-        # They must only be initialized inside the run() method!
         self.logger = None
-        self._model = None
+        self._classifier = None
+        self.db = None
+        
+        self.candidate_labels = [
+            "AI Security & Prompt Injection",
+            "Red Teaming & Penetration Testing",
+            "Malware Analysis & Zero-Days",
+            "Infrastructure & DevOps",
+            "Startup Funding & Acquisitions",
+            "General Tech News"
+        ]
 
     def _load_model(self):
-        """Simulates loading a massive PyTorch/TensorFlow model into memory."""
-        self.logger.info("Allocating VRAM and loading Neural Network weights...")
-        time.sleep(2.0) # Simulate a 2-second load time
-        self._model = "IsoCore-DistilBERT-v1"
-        self.logger.info(f"Model '{self._model}' loaded successfully. Ready for inference.")
+        self.logger.info("Allocating RAM and loading BART-Large weights (~1.6GB)...")
+        self._classifier = pipeline(
+            task="zero-shot-classification",
+            model="facebook/bart-large-mnli",
+            device=-1 
+        )
+        self.logger.info("Zero-Shot Model loaded successfully. Ready for inference.")
 
     def run(self):
-        """
-        This is the entry point for the new OS Process. 
-        Everything in here happens in an isolated memory space.
-        """
-        # 1. The Handshake: Connect this process's root logger back to the Main Process
+        """The entry point for the isolated OS Process."""
         LogManager.setup_worker(self.log_queue)
         self.logger = LogManager.get_logger("isocore.brain")
-
-        # Tell this isolated process to ignore Ctrl+C from the terminal.
-        # It will only shut down when it receives the POISON_PILL from the queue.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        
+        # Enforce the thread limit at the runtime level as well
+        torch.set_num_threads(1)
 
+        # Stagger the boot sequence by a few seconds per worker
+        # This prevents the workers from colliding when accessing the Hugging Face disk cache
+        delay_seconds = self.worker_id * 2.5
+        if delay_seconds > 0:
+            self.logger.trace(f"Delaying boot by {delay_seconds}s to prevent I/O stampede...")
+            time.sleep(delay_seconds)
+            
         self.logger.trace("Worker process booted. Environment isolated.")
 
-        # 2. Load the Brain
+        self.db = DatabaseManager()
         self._load_model()
 
-        # 3. The Infinite Inference Loop
         try:
-            while True:
-                # Block until we have at least 1 item, then sweep up to 32
-                batch = self.queue_manager.get_batch(target_size=32, max_wait=1.0)
-                
+            # Check the switch before pulling new data!
+            while not self.shutdown_event.is_set():
+                batch = self.queue_manager.get_batch(
+                    target_size=settings.batch_size, 
+                    max_wait=settings.max_wait_seconds
+                )
                 if not batch:
-                    # The queue was empty for a full second. Just loop and wait again.
                     continue
 
-                # Check for the Graceful Shutdown signal
-                if "POISON_PILL" in batch:
-                    self.logger.info("Poison Pill swallowed. Commencing safe worker shutdown.")
-                    break
-
-                # We have a valid batch of DataPackets! Process them.
                 self._process_batch(batch)
+
+            # If we break out of the loop because the switch was flipped:
+            if self.shutdown_event.is_set():
+                self.logger.info("Emergency Stop Event detected. Abandoning backlog and shutting down.")
 
         except Exception as e:
             self.logger.error(f"Fatal error in InferenceWorker: {e}", exc_info=True)
         finally:
-            # Clean up VRAM/RAM before the process truly dies
             self.logger.trace("Clearing model from memory...")
-            self._model = None
+            self._classifier = None
             self.logger.info("InferenceWorker has exited cleanly.")
 
     def _process_batch(self, batch: List[DataPacket]):
-        """Simulates the matrix multiplication for a batch of text."""
         start_time = time.time()
         
-        # In a real app, you would tokenize all text here and pass a single large tensor to the model.
-        # We will simulate the math taking slightly longer for larger batches (approx 5ms per item).
-        compute_time = len(batch) * 0.005
-        time.sleep(compute_time)
+        texts = [packet.raw_content for packet in batch]
+        ai_predictions = self._classifier(texts, candidate_labels=self.candidate_labels)
+        
+        if not isinstance(ai_predictions, list):
+            ai_predictions = [ai_predictions]
         
         results = []
-        for packet in batch:
-            # Simulate generating a probability distribution
-            sentiment = {
-                "positive": round(random.uniform(0.1, 0.9), 2),
-                "negative": round(random.uniform(0.1, 0.9), 2)
-            }
-            
-            # Normalize so they sum to 1.0 roughly
-            total = sentiment["positive"] + sentiment["negative"]
-            sentiment["positive"] = round(sentiment["positive"] / total, 2)
-            sentiment["negative"] = round(sentiment["negative"] / total, 2)
+        for packet, prediction in zip(batch, ai_predictions):
+            top_label = prediction['labels'][0]
+            confidence = prediction['scores'][0]
 
             result = ResultPacket(
                 original_packet_id=packet.id,
                 source=packet.source,
-                sentiment_scores=sentiment,
+                top_category=top_label,
+                confidence_score=round(confidence, 4),
                 end_to_end_latency_ms=round((time.time() - packet.timestamp) * 1000, 2)
             )
             results.append(result)
-            
-            # Use our custom TRACE level to watch the algorithmic math happen
-            self.logger.trace(f"Inference complete for {packet.id[:8]} -> {sentiment}")
+            self.logger.trace(f"[{packet.id[:8]}] AI Output: {top_label.upper()} ({confidence*100:.1f}%)")
 
         end_time = time.time()
+        self.db.save_results(results)
+
+        ai_math_ms = round((end_time - start_time) * 1000, 2)
+        avg_wait_ms = round(sum((start_time - p.timestamp) * 1000 for p in batch) / len(batch), 2)
+        avg_total_ms = round(sum(r.end_to_end_latency_ms for r in results) / len(results), 2)
+
         self.logger.debug(
-            f"Processed batch of {len(batch)} items in {round((end_time - start_time) * 1000, 2)}ms. "
-            f"Avg latency: {round(sum(r.end_to_end_latency_ms for r in results) / len(results), 2)}ms"
+            f"Processed batch of {len(batch)}. "
+            f"Queue Wait: {avg_wait_ms}ms | AI Math: {ai_math_ms}ms | Total Latency: {avg_total_ms}ms"
         )

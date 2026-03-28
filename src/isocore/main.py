@@ -17,12 +17,15 @@ from isocore.core.queue_manager import QueueManager
 # Processors & Ingestors
 from isocore.processors.inference import InferenceWorker
 from isocore.ingestors.reddit import SimulatedRedditSource
+from isocore.core.config import settings
+from isocore.ingestors.hackernews_live import LiveHackerNewsSource
 
 # Global references for the shutdown handler
 _queue_manager = None
 _log_manager = None
-_inference_worker = None
+_inference_workers = []
 _system_logger = None
+_shutdown_event = multiprocessing.Event()
 
 
 def handle_shutdown(sig, frame):
@@ -40,19 +43,22 @@ def handle_shutdown(sig, frame):
     except RuntimeError:
         pass # Loop might already be closed
 
-    # 2. Send the Poison Pill
-    if _queue_manager:
-        _queue_manager.send_poison_pill()
+    # 2. Engage the Emergency Stop
+    if _system_logger:
+        _system_logger.info("Engaging Emergency Stop Event. Bypassing queue...")
+    _shutdown_event.set()
 
-    # 3. Wait for the Brain
-    if _inference_worker and _inference_worker.is_alive():
+    # 3. Wait for the fleet to finish their current batch and exit
+    if _inference_workers:
         if _system_logger:
-            _system_logger.info("Waiting for InferenceWorker to finish current batch...")
-        _inference_worker.join(timeout=5.0)
-        if _inference_worker.is_alive():
-            if _system_logger:
-                _system_logger.warning("InferenceWorker stuck. Terminating forcefully.")
-            _inference_worker.terminate()
+            _system_logger.info(f"Waiting for {len(_inference_workers)} workers to finish current batch...")
+        for worker in _inference_workers:
+            if worker.is_alive():
+                worker.join(timeout=settings.shutdown_timeout)
+                if worker.is_alive():
+                    if _system_logger:
+                        _system_logger.warning(f"{worker.name} stuck. Terminating forcefully.")
+                    worker.terminate()
 
     # 4. Stop the Heart
     if _queue_manager:
@@ -78,22 +84,37 @@ async def boot_sequence():
     _queue_manager = QueueManager(max_size=1000)
     _system_logger.trace("QueueManager bridge established.")
 
-    # 2. Spawn the Brain
-    _system_logger.info("Spawning Inference Worker...")
-    _inference_worker = InferenceWorker(
-        queue_manager=_queue_manager, 
-        log_queue=_log_manager.log_queue
-    )
-    _inference_worker.start()
+    # Hardware-Aware Auto-Scaling ---
+    target_workers = settings.worker_count
+    system_cores = multiprocessing.cpu_count()
+
+    if target_workers <= 0:
+        # Reserve 2 cores (one for the OS, one for the async Orchestrator/Ingestor)
+        # Cap at 4 by default to prevent a 1.6GB model from eating 20GB+ of RAM on massive servers
+        calculated_cores = max(1, system_cores - 2)
+        target_workers = min(4, calculated_cores)
+
+    _system_logger.info(f"Hardware Detected: {system_cores} CPU Cores. Spawning {target_workers} Inference Workers...")
+
+    # 2. Spawn the fleet of Inference Workers
+    _system_logger.info("Spawning the fleet...")
+    for i in range(target_workers):
+        worker = InferenceWorker(
+            queue_manager=_queue_manager, 
+            log_queue=_log_manager.log_queue,
+            worker_id=i,
+            shutdown_event=_shutdown_event
+        )
+        worker.start()
+        _inference_workers.append(worker)
 
     # 3. Boot the Senses
-    subreddits = ["MachineLearning", "netsec", "cybersecurity", "Python"]
-    reddit_source = SimulatedRedditSource(_queue_manager, subreddits)
+    hn_source = LiveHackerNewsSource(_queue_manager)
     
     _system_logger.info("Starting Asynchronous Ingestors...")
     
     try:
-        await reddit_source.listen()
+        await hn_source.listen()
     except asyncio.CancelledError:
         _system_logger.trace("Main event loop caught CancelledError. Shutting down.")
 
@@ -103,10 +124,10 @@ def main():
     print("--- Starting IsoCore ---")
     print("Press Ctrl+C to stop.")
 
-    # CRITICAL FIX 1: Force "spawn" to prevent async/fork deadlocks on Linux
+    # Force "spawn" to prevent async/fork deadlocks on Linux
     multiprocessing.set_start_method("spawn", force=True)
     
-    # CRITICAL FIX 2: Boot the logging bridge outside the async loop
+    # Boot the logging bridge outside the async loop
     global _log_manager, _system_logger
     try:
         _log_manager = LogManager()
