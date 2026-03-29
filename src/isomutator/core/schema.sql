@@ -1,4 +1,4 @@
--- IsoCore Initial Schema (src/isocore/core/schema.sql)
+-- isomutator Initial Schema (src/isomutator/core/schema.sql)
 
 -- In database design, SQL is divided into two main categories:
 

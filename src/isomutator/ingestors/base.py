@@ -1,20 +1,20 @@
 """
-IsoCore Base Ingestor (src/isocore/ingestors/base.py)
+isomutator Base Ingestor (src/isomutator/ingestors/base.py)
 -----------------------------------------------------
 The abstract blueprint for all asynchronous data sources.
 """
 
 import abc
 import asyncio
-from isocore.core.queue_manager import QueueManager
-from isocore.core.log_manager import LogManager
+from isomutator.core.queue_manager import QueueManager
+from isomutator.core.log_manager import LogManager
 
 class BaseSource(abc.ABC):
     def __init__(self, queue_manager: QueueManager, name: str):
         self.queue_manager = queue_manager
         self.name = name
-        # We grab a logger specific to this source (e.g., 'isocore.ingest.reddit')
-        self.logger = LogManager.get_logger(f"isocore.ingest.{name.lower()}")
+        # We grab a logger specific to this source (e.g., 'isomutator.ingest.reddit')
+        self.logger = LogManager.get_logger(f"isomutator.ingest.{name.lower()}")
 
     @abc.abstractmethod
     async def listen(self):

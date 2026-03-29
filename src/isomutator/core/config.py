@@ -1,5 +1,5 @@
 """
-IsoCore Configuration Manager (src/isocore/core/config.py)
+isomutator Configuration Manager (src/isomutator/core/config.py)
 ----------------------------------------------------------
 Loads variables from .env and ensures strict typing.
 """
@@ -13,7 +13,7 @@ class IsoConfig(BaseSettings):
     shutdown_timeout: float = 15.0
 
     # Storage with safe default
-    db_path: str = "data/isocore.db"
+    db_path: str = "data/isomutator.db"
 
     # Worker scaling
     # 0 means auto-detect based on CPU cores

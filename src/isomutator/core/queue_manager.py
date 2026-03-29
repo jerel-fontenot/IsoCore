@@ -1,5 +1,5 @@
 """
-IsoCore Queue Manager (src/isocore/core/queue_manager.py)
+isomutator Queue Manager (src/isomutator/core/queue_manager.py)
 ---------------------------------------------------------
 Bridges the asyncio event loop (Ingestors) with the 
 multiprocessing workers (Inference) safely and efficiently.
@@ -11,7 +11,7 @@ import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
 
 # We import the LogManager to grab our pre-configured system logger
-from isocore.core.log_manager import LogManager
+from isomutator.core.log_manager import LogManager
 
 
 class QueueManager:
@@ -20,7 +20,7 @@ class QueueManager:
         Initializes the communication bridge.
         max_size prevents RAM exhaustion if the scrapers outpace the Neural Network.
         """
-        self.logger = LogManager.get_logger("isocore.system")
+        self.logger = LogManager.get_logger("isomutator.system")
         
         # The underlying OS-level pipe
         self._queue = multiprocessing.Queue(maxsize=max_size)

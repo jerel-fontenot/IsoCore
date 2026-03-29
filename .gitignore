@@ -25,6 +25,7 @@ models/
 # System-specific / Shared Memory
 /dev/shm/*
 .env
+.quarantine/
 
 # Tooling & Linting
 .pytest_cache/

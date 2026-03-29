@@ -1,5 +1,5 @@
 """
-IsoCore Database Sink (src/isocore/core/database.py)
+isomutator Database Sink (src/isomutator/core/database.py)
 ----------------------------------------------------
 Handles batch inserts of AI classifications into a local SQLite file.
 """
@@ -8,9 +8,9 @@ import sqlite3
 from pathlib import Path
 from typing import List
 
-from isocore.models.packet import ResultPacket
-from isocore.core.log_manager import LogManager
-from isocore.core.config import settings
+from isomutator.models.packet import ResultPacket
+from isomutator.core.log_manager import LogManager
+from isomutator.core.config import settings
 
 class DatabaseManager:
     def __init__(self):
@@ -18,7 +18,7 @@ class DatabaseManager:
         self.db_path = Path(settings.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
-        self.logger = LogManager.get_logger("isocore.db")
+        self.logger = LogManager.get_logger("isomutator.db")
         self._init_db()
 
     def _init_db(self):

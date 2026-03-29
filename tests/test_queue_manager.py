@@ -1,12 +1,12 @@
 """
-IsoCore Queue Manager Tests (tests/test_queue_manager.py)
+isomutator Queue Manager Tests (tests/test_queue_manager.py)
 ---------------------------------------------------------
 Run with: uv run pytest tests/test_queue_manager.py -v
 """
 
 import asyncio
 import pytest
-from isocore.core.queue_manager import QueueManager
+from isomutator.core.queue_manager import QueueManager
 
 # ==========================================
 # Fixtures

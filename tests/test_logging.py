@@ -7,10 +7,10 @@ import time
 import sys
 from pathlib import Path
 
-# Ensure the src directory is in the path so we can import our IsoCore module
+# Ensure the src directory is in the path so we can import our isomutator module
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from isocore.core.log_manager import LogManager
+from isomutator.core.log_manager import LogManager
 
 
 def fake_inference_worker(log_queue):
@@ -19,8 +19,8 @@ def fake_inference_worker(log_queue):
     LogManager.setup_worker(log_queue)
     
     # 2. Get the specific logger for the brain
-    # (In logging.json, we set 'isocore.brain' to propagate TRACE messages)
-    logger = LogManager.get_logger("isocore.brain")
+    # (In logging.json, we set 'isomutator.brain' to propagate TRACE messages)
+    logger = LogManager.get_logger("isomutator.brain")
     
     # 3. Prove it works
     logger.info("Worker process booted successfully.")
@@ -32,7 +32,7 @@ def fake_inference_worker(log_queue):
 
 
 def main():
-    print("--- Starting IsoCore Logging Test ---")
+    print("--- Starting isomutator Logging Test ---")
     
     # 1. Initialize the nervous system (loads configs/logging.json)
     log_manager = LogManager()
@@ -40,7 +40,7 @@ def main():
     
     # 2. Get the system logger for the main process
     # (In logging.json, this will hit the root level, meaning TRACE goes to file, INFO to console)
-    sys_logger = LogManager.get_logger("isocore.system")
+    sys_logger = LogManager.get_logger("isomutator.system")
     sys_logger.info("Orchestrator boot sequence initiated.")
     sys_logger.trace("Checking Fedora system resources...") # Should only appear in the file!
 
@@ -62,9 +62,9 @@ def main():
     print("--- Test Complete ---")
     
     # 6. Read the file to prove the TRACE logs were captured
-    print("\n--- Contents of logs/isocore.log ---")
+    print("\n--- Contents of logs/isomutator.log ---")
     try:
-        with open("logs/isocore.log", "r") as f:
+        with open("logs/isomutator.log", "r") as f:
             print(f.read())
     except FileNotFoundError:
         print("ERROR: Log file not found!")

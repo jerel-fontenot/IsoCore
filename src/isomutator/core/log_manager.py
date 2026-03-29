@@ -1,5 +1,5 @@
 """
-IsoCore Log Manager (src/isocore/core/log_manager.py)
+isomutator Log Manager (src/isomutator/core/log_manager.py)
 -----------------------------------------------------
 Handles the centralized, process-safe logging architecture.
 Reads configuration from JSON and manages the QueueListener.
@@ -86,12 +86,12 @@ class LogManager:
         """Starts the background thread that writes logs to disk."""
         if self.listener:
             self.listener.start()
-            logging.getLogger("isocore.system").trace("LogManager QueueListener started via JSON config.")
+            logging.getLogger("isomutator.system").trace("LogManager QueueListener started via JSON config.")
 
     def stop(self):
         """Flushes the queue and stops the background thread safely."""
         if self.listener:
-            logging.getLogger("isocore.system").trace("LogManager QueueListener stopping...")
+            logging.getLogger("isomutator.system").trace("LogManager QueueListener stopping...")
             self.listener.stop()
 
     @staticmethod
@@ -106,7 +106,7 @@ class LogManager:
         queue_handler = logging.handlers.QueueHandler(log_queue)
         root_logger.addHandler(queue_handler)
         
-        logging.getLogger("isocore.worker").trace("Worker logger attached to shared queue.")
+        logging.getLogger("isomutator.worker").trace("Worker logger attached to shared queue.")
 
     @staticmethod
     def get_logger(name: str) -> logging.Logger:

@@ -1,24 +1,24 @@
 """
-IsoCore Orchestrator (src/isocore/main.py)
-------------------------------------------
-The "Conductor" of the IsoCore neural network project.
-Run with: uv run python src/isocore/main.py
-"""
+ALGORITHM SUMMARY:
+This is the IsoMutator Orchestrator. It manages the two-stage red-teaming pipeline.
+It initializes the Attack Queue (for outgoing payloads) and the Eval Queue (for incoming target responses).
+Currently, it boots the PromptMutator to flood the Attack Queue with fuzzy payloads.
 
+TECHNOLOGY QUIRKS:
+- Asyncio Task Management: The Mutator runs indefinitely in the main event loop. When Ctrl+C 
+is pressed, the handle_shutdown algorithm cancels this task, raising a CancelledError which we catch cleanly to prevent ugly stack traces.
+"""
 import asyncio
 import signal
 import sys
 import multiprocessing
 
-# Core Managers
-from isocore.core.log_manager import LogManager
-from isocore.core.queue_manager import QueueManager
-
-# Processors & Ingestors
-from isocore.processors.inference import InferenceWorker
-from isocore.ingestors.reddit import SimulatedRedditSource
-from isocore.core.config import settings
-from isocore.ingestors.hackernews_live import LiveHackerNewsSource
+from isomutator.core.queue_manager import QueueManager
+from isomutator.core.log_manager import LogManager
+from isomutator.core.config import settings
+from isomutator.ingestors.mutator import PromptMutator
+from isomutator.processors.striker import AsyncStriker
+from isomutator.processors.judge import RedTeamJudge
 
 # Global references for the shutdown handler
 _queue_manager = None
@@ -70,58 +70,54 @@ def handle_shutdown(sig, frame):
             _system_logger.info("Flushing remaining logs to disk...")
         _log_manager.stop()
 
-    print("--- IsoCore Shutdown Complete ---")
+    print("--- isomutator Shutdown Complete ---")
     sys.exit(0)
 
 
 async def boot_sequence():
     """The Boot Sequence Algorithm."""
-    global _queue_manager, _inference_worker, _system_logger
+    global _attack_queue, _eval_queue, _system_logger, _inference_workers
 
-    _system_logger.info("IsoCore Boot Sequence Initiated.")
-
-    # 1. Initialize Queues
-    _queue_manager = QueueManager(max_size=1000)
-    _system_logger.trace("QueueManager bridge established.")
-
-    # Hardware-Aware Auto-Scaling ---
-    target_workers = settings.worker_count
-    system_cores = multiprocessing.cpu_count()
-
-    if target_workers <= 0:
-        # Reserve 2 cores (one for the OS, one for the async Orchestrator/Ingestor)
-        # Cap at 4 by default to prevent a 1.6GB model from eating 20GB+ of RAM on massive servers
-        calculated_cores = max(1, system_cores - 2)
-        target_workers = min(4, calculated_cores)
-
-    _system_logger.info(f"Hardware Detected: {system_cores} CPU Cores. Spawning {target_workers} Inference Workers...")
-
-    # 2. Spawn the fleet of Inference Workers
-    _system_logger.info("Spawning the fleet...")
-    for i in range(target_workers):
-        worker = InferenceWorker(
-            queue_manager=_queue_manager, 
-            log_queue=_log_manager.log_queue,
-            worker_id=i,
-            shutdown_event=_shutdown_event
-        )
-        worker.start()
-        _inference_workers.append(worker)
-
-    # 3. Boot the Senses
-    hn_source = LiveHackerNewsSource(_queue_manager)
+    _system_logger.info("IsoMutator Boot Sequence Initiated.")
     
-    _system_logger.info("Starting Asynchronous Ingestors...")
+    # 1. Boot the Two-Stage Queues
+    _attack_queue = QueueManager(max_size=1000)
+    _eval_queue = QueueManager(max_size=1000)
+
+    # 2. Boot the Red Team Judge (The Scorer)
+    judge = RedTeamJudge(
+        eval_queue=_eval_queue,
+        log_queue=_log_manager.log_queue
+    )
+    judge.start()
+    _inference_workers.append(judge)
+
+    # 3. Boot the Async Striker (The Outbound Cannon)
+    striker = AsyncStriker(
+        attack_queue=_attack_queue,
+        eval_queue=_eval_queue,
+        log_queue=_log_manager.log_queue,
+        # Pointing to the remote Ollama daemon's chat endpoint
+        target_url="http://192.9.159.125:11434/api/chat" 
+    )
+    striker.start()
+    
+    # Add the striker to the workers list so it receives the poison pill on shutdown
+    _inference_workers.append(striker) 
+
+    # 4. Boot the Payload Generator
+    mutator = PromptMutator(_attack_queue)
+    _system_logger.info("Starting Asynchronous Prompt Mutator...")
     
     try:
-        await hn_source.listen()
+        await mutator.listen()
     except asyncio.CancelledError:
-        _system_logger.trace("Main event loop caught CancelledError. Shutting down.")
+        _system_logger.trace("Main event loop caught CancelledError. Shutting down generator.")
 
 
 def main():
-    """Entry point for IsoCore."""
-    print("--- Starting IsoCore ---")
+    """Entry point for isomutator."""
+    print("--- Starting isomutator ---")
     print("Press Ctrl+C to stop.")
 
     # Force "spawn" to prevent async/fork deadlocks on Linux
@@ -132,7 +128,7 @@ def main():
     try:
         _log_manager = LogManager()
         _log_manager.start()
-        _system_logger = LogManager.get_logger("isocore.system")
+        _system_logger = LogManager.get_logger("isomutator.system")
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to boot LogManager. Check your JSON path. Details: {e}")
         sys.exit(1)
