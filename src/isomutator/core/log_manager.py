@@ -1,8 +1,21 @@
 """
-isomutator Log Manager (src/isomutator/core/log_manager.py)
------------------------------------------------------
-Handles the centralized, process-safe logging architecture.
-Reads configuration from JSON and manages the QueueListener.
+ALGORITHM SUMMARY:
+The LogManager establishes a centralized, asynchronous, and process-safe logging architecture.
+1. It defines a custom TRACE level (Level 5) for granular algorithm tracking.
+2. Initialization: It reads the physical handler definitions (Console, Rotating File) 
+from a user-defined `logging.json` file via `dictConfig`.
+3. Handler Hijacking: It extracts these physical handlers from the root logger, 
+programmatically appends the custom `UIDispatchHandler`, and assigns them all 
+to a background `QueueListener`.
+4. UI Routing (Observer Pattern): The `UIDispatchHandler` intercepts LogRecords tagged 
+with specific `ui_event` attributes and routes them to the `DashboardManager`.
+
+TECHNOLOGY QUIRKS:
+- Singleton Pattern: Enforced via `__new__` to guarantee that only one underlying 
+`multiprocessing.Queue` and `QueueListener` are ever instantiated, preventing OS-level pipe leaks.
+- Programmatic Injection: The `UIDispatchHandler` is injected into the handler list 
+after the JSON configuration is applied. This avoids the complexity of writing a custom 
+dictionary parser for the `rich` UI dependencies inside the JSON file itself.
 """
 
 import json
@@ -16,19 +29,58 @@ from pathlib import Path
 # 1. The TRACE Injection
 # ==========================================
 TRACE_LEVEL_NUM = 5
-logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+if not hasattr(logging, "TRACE"):
+    logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+    logging.TRACE = TRACE_LEVEL_NUM
 
 def trace(self, message, *args, **kws):
+    """Allows logger.trace('message') calls across the codebase."""
     if self.isEnabledFor(TRACE_LEVEL_NUM):
         self._log(TRACE_LEVEL_NUM, message, args, **kws)
 
 logging.Logger.trace = trace
 
+# ==========================================
+# 2. UI Telemetry Router
+# ==========================================
+class UIDispatchHandler(logging.Handler):
+    """
+    Custom logging handler that intercepts structured UI events and 
+    routes them to the DashboardManager.
+    """
+    def __init__(self):
+        super().__init__()
+        self.dashboard = None
+
+    def attach_dashboard(self, dashboard):
+        self.dashboard = dashboard
+
+    def emit(self, record):
+        if not self.dashboard:
+            return
+
+        # Check if this LogRecord contains UI routing data
+        ui_event = getattr(record, "ui_event", None)
+        if ui_event == "wiretap":
+            self.dashboard.add_wiretap_event(
+                turn=getattr(record, "turn", 0),
+                attacker_text=getattr(record, "attacker", ""),
+                target_text=getattr(record, "target", "")
+            )
+        elif ui_event == "ledger":
+            self.dashboard.add_vulnerability(
+                turn=getattr(record, "turn", 0),
+                strategy=getattr(record, "strategy", "unknown"),
+                packet_id=getattr(record, "packet_id", "unknown")
+            )
 
 # ==========================================
-# 2. The LogManager Singleton
+# 3. The LogManager Singleton
 # ==========================================
 class LogManager:
+    """
+    Centralized manager for multi-process logging and UI event routing.
+    """
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -46,12 +98,13 @@ class LogManager:
 
         self.log_queue = multiprocessing.Queue()
         self.listener = None
+        self.ui_handler = UIDispatchHandler()
         
         self._setup_from_config(config_path)
         self._initialized = True
 
     def _setup_from_config(self, config_path: str):
-        """Loads JSON config and wires the QueueListener."""
+        """Loads JSON config, injects the UI handler, and wires the QueueListener."""
         # Load the raw JSON dictionary
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
@@ -66,8 +119,11 @@ class LogManager:
         # We grab the physical handlers (Console and File) that dictConfig just made
         physical_handlers = root_logger.handlers.copy()
 
+        # Append the custom UI handler directly to the physical handler array
+        physical_handlers.append(self.ui_handler)
+
         # 3. Disconnect them from the root logger
-        # We do NOT want the Main Process writing directly to the file
+        # We do NOT want the Main Process writing directly to the file/console
         root_logger.handlers.clear()
 
         # 4. Give the physical handlers to the background listener
@@ -81,6 +137,11 @@ class LogManager:
         # Now, anything logged in the Main Process goes into the queue
         main_queue_handler = logging.handlers.QueueHandler(self.log_queue)
         root_logger.addHandler(main_queue_handler)
+
+    def attach_dashboard(self, dashboard):
+        """Links the UI Dispatcher to the live DashboardManager."""
+        self.ui_handler.attach_dashboard(dashboard)
+        logging.getLogger("isomutator.system").trace("DashboardManager successfully attached to UI Dispatcher.")
 
     def start(self):
         """Starts the background thread that writes logs to disk."""
