@@ -30,6 +30,7 @@ from isomutator.processors.striker import AsyncStriker
 from isomutator.processors.judge import RedTeamJudge
 from isomutator.ui.dashboard import DashboardManager
 from isomutator.core.strategies import JailbreakStrategy, ModelInversionStrategy
+from isomutator.reporting.reporter import VulnerabilityReporter
 
 # Global references for the shutdown handler
 _active_queues = [] 
@@ -75,6 +76,13 @@ def handle_shutdown(sig, frame):
     # 5. Flush the Logging Buffers
     if _log_manager:
         _log_manager.stop()
+
+    print("\n[Orchestrator] Compiling forensic data...")
+    try:
+        reporter = VulnerabilityReporter(log_path="vulnerabilities.jsonl")
+        reporter.save_report("isomutator_report.html")
+    except Exception as e:
+        print(f"[Orchestrator] Non-fatal error generating report: {e}")
 
     print("--- IsoMutator Shutdown Complete ---")
     sys.exit(0)
@@ -157,7 +165,7 @@ def main():
     parser.add_argument(
         "--mode", 
         type=str, 
-        choices=["jailbreak", "inversion"], 
+        choices=["jailbreak", "inversion", "prompt_leaking", "cross_lingual", "obfuscation", "exhaustion"], 
         default="jailbreak",
         help="Select the attack strategy to execute."
     )
