@@ -21,17 +21,20 @@ import asyncio
 import signal
 import sys
 import multiprocessing
+from pathlib import Path
 
 from isomutator.core.queue_manager import QueueManager
 from isomutator.core.log_manager import LogManager
 from isomutator.core.config import settings
 from isomutator.ingestors.mutator import PromptMutator
+from isomutator.ingestors.context_mutator import ContextMutator
 from isomutator.processors.striker import AsyncStriker
 from isomutator.processors.judge import RedTeamJudge
 from isomutator.ui.dashboard import DashboardManager
 from isomutator.reporting.reporter import VulnerabilityReporter
 from isomutator.core.strategies import (
-    JailbreakStrategy, 
+    JailbreakStrategy,
+    ContextInjectionStrategy,
     ModelInversionStrategy,
     PromptLeakingStrategy,
     CrossLingualStrategy,
@@ -40,8 +43,17 @@ from isomutator.core.strategies import (
     OwaspXssStrategy,
     LinuxPrivescStrategy,
     PersonaJailbreakStrategy,
-    GradientStrategy
+    GradientStrategy,
+    FinancialReportContextStrategy
 )
+
+# --- Object-Oriented Path Resolution ---
+# By using .absolute() instead of .resolve() or .cwd(), we treat the path as a pure object
+# and avoid the async monkeypatching hooks that check the physical disk.
+_THIS_FILE = Path(__file__).absolute()
+# Hierarchy: src/isomutator/main.py -> src/isomutator -> src -> IsoMutator (Project Root)
+PROJECT_ROOT = _THIS_FILE.parent.parent.parent
+LOCAL_STAGING_DIR = PROJECT_ROOT / "tmp" / "isomutator_staging"
 
 # Global references for the shutdown handler
 _active_queues = [] 
@@ -148,13 +160,23 @@ async def boot_sequence(strategy):
     )
     _log_manager.attach_dashboard(dashboard)
 
-    # 5. Boot the Payload Generator (The Brain)
-    _system_logger.info("Starting Stateful Asynchronous Prompt Mutator...")
-    mutator = PromptMutator(
-        attack_queue=_attack_queue, 
-        feedback_queue=_feedback_queue,
-        strategy=strategy
-    )
+    # 5. Boot the Payload Generator (The Brain) - DYNAMIC ROUTING
+    if isinstance(strategy, ContextInjectionStrategy):
+        _system_logger.info("Context Injection Interface detected. Starting Dual-Stage ContextMutator...")
+        
+        mutator = ContextMutator(
+            attack_queue=_attack_queue, 
+            feedback_queue=_feedback_queue,
+            strategy=strategy,
+            staging_dir=str(LOCAL_STAGING_DIR)
+        )
+    else:
+        _system_logger.info("Conversational Interface detected. Starting PromptMutator...")
+        mutator = PromptMutator(
+            attack_queue=_attack_queue, 
+            feedback_queue=_feedback_queue,
+            strategy=strategy
+        )
     
     try:
         # Concurrently run the UI and the Generator
@@ -164,6 +186,7 @@ async def boot_sequence(strategy):
         )
     except asyncio.CancelledError:
         _system_logger.trace("Main event loop caught CancelledError. Pipeline shut down cleanly.")
+
 
 
 def main():
@@ -183,7 +206,8 @@ def main():
         "owasp_xss": OwaspXssStrategy,
         "linux_privesc": LinuxPrivescStrategy,
         "persona": PersonaJailbreakStrategy,
-        "gradient": GradientStrategy
+        "gradient": GradientStrategy,
+        "financial_context": FinancialReportContextStrategy
     }
 
     # Setup the argument parser dynamically using the factory keys

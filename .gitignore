@@ -46,3 +46,4 @@ htmlcov/
 *.swo
 *.swn
 vulnerabilities.jsonl
+isomutator_report.html

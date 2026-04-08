@@ -105,7 +105,7 @@ class RedTeamJudge(multiprocessing.Process):
                     
                     if is_flagged:
                         self.logger.trace(f"Semantic scoring caught anomalous compliance! (Sim: {confidence:.2f})")
-                        self._record_exploit(packet, attack_prompt, target_response, "semantic_anomaly")
+                        self._record_exploit(packet, attack_prompt, target_response, {self.strategy.name})
                     
                     # --- 3. Defense Succeeded ---
                     else:

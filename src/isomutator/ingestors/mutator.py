@@ -13,13 +13,15 @@ To prevent CPU thrashing on constrained hardware, it acts as a traffic controlle
 TECHNOLOGY QUIRKS:
 - BaseSource Inheritance: Inherits `_safe_put` from BaseSource to standardize queue 
   dispatching and prevent queue-full deadlocks.
-- Greedy Extraction: Attacker LLM JSON outputs are sometimes malformed; the mutator 
-  uses a fallback cascade to aggressively extract the generated prompt string.
+- Hardened JSON Ingestion: Uses Regex markdown stripping and an automated retry loop 
+  that feeds JSONDecodeErrors back to the LLM for self-correction.
+  Note: Backticks for markdown parsing are generated via chr(96) to prevent UI truncation.
 """
 import asyncio
 import aiohttp
 import json
 import logging
+import re
 from typing import List, Dict
 
 from isomutator.ingestors.base import BaseSource
@@ -44,7 +46,7 @@ class PromptMutator(BaseSource):
         super().__init__(attack_queue, name="PromptMutator")
         self.attack_queue = attack_queue
         self.feedback_queue = feedback_queue
-        self.strategy = strategy # Inject the strategy
+        self.strategy = strategy
         
         self.attacker_url = "http://192.9.159.125:11434/api/chat"
         self.attacker_model = "llama3.2" 
@@ -65,6 +67,65 @@ class PromptMutator(BaseSource):
                 self.logger.trace(f"Hard refusal signature '{signature}' detected.")
                 return True
         return False
+
+    async def _call_llm_with_retry(self, session: aiohttp.ClientSession, messages: list, max_retries: int = 3) -> dict:
+        """
+        Executes the LLM call with built-in Markdown stripping and a feedback-driven retry loop.
+        """
+        current_messages = messages.copy()
+        
+        for attempt in range(max_retries):
+            payload = {
+                "model": self.attacker_model,
+                "format": "json",
+                "messages": current_messages,
+                "stream": False
+            }
+
+            try:
+                async with session.post(self.attacker_url, json=payload, timeout=300.0) as response:
+                    if response.status != 200:
+                        self.logger.warning(f"HTTP {response.status} from Attacker LLM.")
+                        await asyncio.sleep(2)
+                        continue
+
+                    result_json = await response.json()
+                    response_text = result_json.get("message", {}).get("content", "{}")
+                    
+                    # 1. Regex Markdown Stripping
+                    clean_text = response_text
+                    
+                    # Workaround: Using chr(96) * 3 to create the three backticks safely without breaking UI parsers
+                    md_ticks = chr(96) * 3
+                    pattern = rf'{md_ticks}(?:json)?\s*(.*?)\s*{md_ticks}'
+                    
+                    match = re.search(pattern, response_text, re.DOTALL | re.IGNORECASE)
+                    if match:
+                        clean_text = match.group(1)
+                        self.logger.trace("Stripped markdown formatting from LLM response.")
+                        
+                    # 2. Strict Parse
+                    try:
+                        parsed_data = json.loads(clean_text)
+                        if attempt > 0:
+                            self.logger.info(f"Successfully recovered JSON syntax on attempt {attempt + 1}.")
+                        return parsed_data
+                        
+                    except json.JSONDecodeError as e:
+                        self.logger.warning(f"JSON Parse Error on attempt {attempt + 1}: {e}. Retrying...")
+                        # Append the failure to the conversation history so the LLM can self-correct
+                        current_messages.append({"role": "assistant", "content": response_text})
+                        current_messages.append({
+                            "role": "user", 
+                            "content": f"Your previous response failed JSON parsing with error: {e}. "
+                                       f"Please output ONLY valid JSON. Remove trailing commas and ensure quotes are escaped."
+                        })
+                        
+            except Exception as e:
+                self.logger.error(f"Network error during LLM generation: {e}")
+                
+        self.logger.error("Exhausted all JSON correction retries. Generation failed.")
+        return {}
 
     async def listen(self):
         self.logger.info("Stateful AI Mutator online. Engaging Ping-Pong CPU lock...")
@@ -157,45 +218,29 @@ class PromptMutator(BaseSource):
             transcript += f"[{role}]: {msg['content']}\n\n"
 
         system_prompt = self.strategy.get_counter_attack_prompt(packet.turn_count)
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Conversation History:\n{transcript}\n\nGenerate your counter-attack."}
+        ]
 
-        payload = {
-            "model": self.attacker_model,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Conversation History:\n{transcript}\n\nGenerate your counter-attack."}
-            ],
-            "stream": False
-        }
+        attack_data = await self._call_llm_with_retry(session, messages)
+        
+        # Greedy extraction fallback
+        new_payload = (
+            attack_data.get("prompt") or 
+            attack_data.get("attack") or 
+            attack_data.get("text") or 
+            attack_data.get("content") or 
+            ""
+        )
+        
+        if not new_payload:
+            string_vals = [str(v) for v in attack_data.values() if isinstance(v, str)]
+            if string_vals:
+                new_payload = max(string_vals, key=len)
 
-        try:
-            async with session.post(self.attacker_url, json=payload, timeout=300.0) as response:
-                if response.status != 200:
-                    return ""
-
-                result_json = await response.json()
-                response_text = result_json.get("message", {}).get("content", "{}")
-                attack_data = json.loads(response_text)
-                
-                # Greedy extraction fallback
-                new_payload = (
-                    attack_data.get("prompt") or 
-                    attack_data.get("attack") or 
-                    attack_data.get("text") or 
-                    attack_data.get("content") or 
-                    ""
-                )
-                
-                if not new_payload:
-                    string_vals = [str(v) for v in attack_data.values() if isinstance(v, str)]
-                    if string_vals:
-                        new_payload = max(string_vals, key=len)
-
-                return new_payload
-                    
-        except Exception as e:
-            self.logger.error(f"Failed to generate counter-attack: {e}")
-            return ""
+        return new_payload
 
     async def _generate_new_seeds(self, session: aiohttp.ClientSession):
         """Generates zero-shot starting points (One goal at a time)."""
@@ -209,39 +254,24 @@ class PromptMutator(BaseSource):
             "{\"attacks\": [{\"strategy\": \"Name of strategy\", \"prompt\": \"The exact text\"}]}"
         )
 
-        payload = {
-            "model": self.attacker_model,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Target Goal: {seed_goal}"}
-            ],
-            "stream": False
-        }
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Target Goal: {seed_goal}"}
+        ]
 
-        try:
-            async with session.post(self.attacker_url, json=payload, timeout=300.0) as response:
-                if response.status != 200:
-                    return
-
-                result_json = await response.json()
-                response_text = result_json.get("message", {}).get("content", "{}")
-                parsed_data = json.loads(response_text)
-                mutations = parsed_data.get("attacks", [])
+        parsed_data = await self._call_llm_with_retry(session, messages)
+        mutations = parsed_data.get("attacks", [])
+        
+        for attack_data in mutations:
+            if isinstance(attack_data, dict):
+                strategy_name = attack_data.get("strategy", "unknown_strategy")
+                payload_text = attack_data.get("prompt", "")
                 
-                for attack_data in mutations:
-                    if isinstance(attack_data, dict):
-                        strategy_name = attack_data.get("strategy", "unknown_strategy")
-                        payload_text = attack_data.get("prompt", "")
-                        
-                        if payload_text:
-                            packet = DataPacket(
-                                raw_content=payload_text,
-                                source=f"ai_mutator/{strategy_name.replace(' ', '_').lower()}",
-                                metadata={"original_goal": seed_goal}
-                            )
-                            await self._safe_put(packet)
-                            await asyncio.sleep(0)
-                            
-        except Exception as e:
-            self.logger.error(f"Seed generation failed: {e}")
+                if payload_text:
+                    packet = DataPacket(
+                        raw_content=payload_text,
+                        source=f"ai_mutator/{strategy_name.replace(' ', '_').lower()}",
+                        metadata={"original_goal": seed_goal}
+                    )
+                    await self._safe_put(packet)
+                    await asyncio.sleep(0)
